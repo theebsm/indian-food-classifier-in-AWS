@@ -4,3 +4,24 @@ __pycache__/
 .env
 test_images/
 *.zip
+# Model files
+*.pth
+*.pt
+
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

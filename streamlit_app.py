@@ -5,6 +5,7 @@ import io
 import os
 import plotly.graph_objects as go
 import plotly.express as px
+from dotenv import load_dotenv
 
 # ---- Page config ----
 st.set_page_config(
@@ -44,8 +45,8 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-API_URL = os.getenv("API_URL", "https://indian-food-classifier-production.up.railway.app")
+load_dotenv()
+API_URL = os.getenv("API_URL", "http://localhost:8001")
 
 # ---- Header ----
 st.markdown('<p class="main-header">🍛 Indian Food Classifier Dashboard</p>',
