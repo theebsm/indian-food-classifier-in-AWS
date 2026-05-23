@@ -122,7 +122,6 @@ with col1:
                         files={"file": ("image.jpg", img_bytes, "image/jpeg")}
                     )
                     result = response.json()
-                    st.write(result)
                     st.session_state['result'] = result
                     st.success("✅ Classification complete!")
                 except Exception as e:
