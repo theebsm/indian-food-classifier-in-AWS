@@ -46,7 +46,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 load_dotenv()
-API_URL = os.getenv("API_URL", "https://apiindfood.theebs.cloud/")
+API_URL = os.getenv("API_URL", "https://apiindfood.theebs.cloud")
 
 # ---- Header ----
 st.markdown('<p class="main-header">🍛 Indian Food Classifier Dashboard</p>',
