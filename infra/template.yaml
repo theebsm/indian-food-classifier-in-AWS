@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Indian Food Classifier - FastAPI backend on EC2 behind ALB
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: apiindfood.theebs.cloud
+    Description: Domain name for the ACM certificate
+  HostedZoneId:
+    Type: String
+    Default: Z042447522450S2BKF707
+    Description: Route 53 Hosted Zone ID for theebs.cloud
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # --- Security Groups ---
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB - allow HTTPS and HTTP from internet
+      VpcId: vpc-00988d75b426ec802
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 - allow traffic from ALB only
+      VpcId: vpc-00988d75b426ec802
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # --- S3 Bucket for Model ---
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-model-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # --- IAM Role for EC2 ---
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3ModelAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ModelBucket.Arn
+                  - !Sub '${ModelBucket.Arn}/*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # --- ACM Certificate (Public, DNS Validated) ---
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  # --- ALB ---
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: food-classifier-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - subnet-0ce562207a394651d
+        - subnet-0e982bb1e7093e599
+        - subnet-09c612b68a541e448
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  APITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: food-classifier-api
+      Port: 8000
+      Protocol: HTTP
+      VpcId: vpc-00988d75b426ec802
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      Targets:
+        - Id: !Ref EC2Instance
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref Certificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref APITargetGroup
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  # --- EC2 Instance ---
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: subnet-0ce562207a394651d
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: food-classifier-ec2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y
+
+          # Add 2GB swap for tight memory
+          dd if=/dev/zero of=/swapfile bs=128M count=16
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+
+          # Install docker and buildx
+          yum install -y docker git wget
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ec2-user
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL "https://github.com/docker/buildx/releases/download/v0.19.3/buildx-v0.19.3.linux-amd64" -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
+          # Install docker-compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+
+          # Clone repo
+          cd /home/ec2-user
+          git clone https://github.com/theebsm/indian-food-classifier-in-AWS.git app
+          cd app
+
+          # Fix port mapping (8000:8000 for ALB)
+          sed -i 's/"8001:8000"/"8000:8000"/' docker-compose.yml
+
+          # Download model from S3
+          mkdir -p model
+          aws s3 cp s3://${ModelBucket}/efficientnet_indian_food.pth model/efficientnet_indian_food.pth
+
+          chown -R ec2-user:ec2-user /home/ec2-user/app
+
+          # Run only FastAPI (Streamlit is on Streamlit Cloud)
+          docker-compose up -d fastapi
+
+  # --- Route 53 DNS Record ---
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+
+Outputs:
+  ALBDNSName:
+    Description: ALB DNS name
+    Value: !GetAtt ALB.DNSName
+  AppURL:
+    Description: API URL
+    Value: !Sub 'https://${DomainName}'
+  ModelBucketName:
+    Description: S3 bucket - upload model here before deploying
+    Value: !Ref ModelBucket
+  UploadModelCommand:
+    Description: Command to upload model to S3
+    Value: !Sub 'aws s3 cp model/efficientnet_indian_food.pth s3://${ModelBucket}/efficientnet_indian_food.pth'
